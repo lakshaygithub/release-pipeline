@@ -1,0 +1,79 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: ruff check .
+      - run: pytest -q
+
+  # Build the image, deploy it to a throwaway Kubernetes cluster, then ship a
+  # deliberately broken release and check that it gets rolled back.
+  deploy-and-rollback:
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      GOOD_TAG: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: ci
+
+      - name: Build images
+        run: |
+          docker build --build-arg APP_VERSION=initial -t release-pipeline:initial .
+          docker build --build-arg APP_VERSION="$GOOD_TAG" -t "release-pipeline:$GOOD_TAG" .
+          docker build --build-arg APP_VERSION=bad --build-arg FAIL_READINESS=true -t release-pipeline:bad .
+          for tag in initial "$GOOD_TAG" bad; do kind load docker-image "release-pipeline:$tag" --name ci; done
+
+      - name: Start MySQL, Redis and the initial release
+        run: |
+          kubectl apply -f k8s/
+          kubectl -n release-pipeline wait --for=condition=available deployment/mysql deployment/redis --timeout=300s
+          kubectl -n release-pipeline rollout status deployment/api --timeout=300s
+
+      - name: Deploy the new release
+        run: scripts/deploy.sh "$GOOD_TAG"
+
+      - name: Smoke test
+        run: |
+          kubectl -n release-pipeline port-forward svc/api 8080:80 >/dev/null 2>&1 &
+          sleep 3
+          curl -fsS localhost:8080/version
+          id=$(curl -fsS -X POST localhost:8080/items -H 'content-type: application/json' \
+                 -d '{"name":"Smoke test","price_cents":100}' | python3 -c 'import sys, json; print(json.load(sys.stdin)["id"])')
+          curl -fsS -D - "localhost:8080/items/$id" -o /dev/null | grep -i '^x-cache: MISS'
+          curl -fsS -D - "localhost:8080/items/$id" -o /dev/null | grep -i '^x-cache: HIT'
+
+      - name: Ship a broken release and expect an automatic rollback
+        env:
+          ROLLOUT_TIMEOUT: 60s
+        run: |
+          if scripts/deploy.sh bad; then
+            echo "The broken release should have been rejected"; exit 1
+          fi
+          image=$(kubectl -n release-pipeline get deployment/api -o jsonpath='{.spec.template.spec.containers[0].image}')
+          echo "Running image after rollback: $image"
+          test "$image" = "release-pipeline:$GOOD_TAG"
+          kubectl -n release-pipeline get pods -l app=api
+
+      - name: Debug info on failure
+        if: failure()
+        run: |
+          kubectl -n release-pipeline get all
+          kubectl -n release-pipeline describe deployment/api
+          kubectl -n release-pipeline logs -l app=api --tail=50 || true

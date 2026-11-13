@@ -1,0 +1,49 @@
+# Demo-only MySQL: data lives in an emptyDir and the password is a local
+# placeholder. A real deployment would use a managed database and a secret store.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysql
+  namespace: release-pipeline
+stringData:
+  root-password: localdev
+  database-url: mysql+pymysql://root:localdev@mysql:3306/catalog
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql
+  namespace: release-pipeline
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: mysql }
+  template:
+    metadata:
+      labels: { app: mysql }
+    spec:
+      containers:
+        - name: mysql
+          image: mysql:8.4
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom: { secretKeyRef: { name: mysql, key: root-password } }
+            - name: MYSQL_DATABASE
+              value: catalog
+          ports: [{ containerPort: 3306 }]
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "mysqladmin ping -h 127.0.0.1 -p\"$MYSQL_ROOT_PASSWORD\""]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          volumeMounts: [{ name: data, mountPath: /var/lib/mysql }]
+      volumes: [{ name: data, emptyDir: {} }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: release-pipeline
+spec:
+  selector: { app: mysql }
+  ports: [{ port: 3306 }]

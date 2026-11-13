@@ -1,0 +1,41 @@
+# Local stack: MySQL + Redis + two copies of the API (cache on / cache off)
+# so the effect of the cache can be measured side by side.
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: localdev
+      MYSQL_DATABASE: catalog
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-plocaldev"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7.4-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    environment:
+      DATABASE_URL: mysql+pymysql://root:localdev@mysql:3306/catalog
+      REDIS_URL: redis://redis:6379/0
+      CACHE_ENABLED: "true"
+    ports: ["8000:8000"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  api-nocache:
+    build: .
+    environment:
+      DATABASE_URL: mysql+pymysql://root:localdev@mysql:3306/catalog
+      CACHE_ENABLED: "false"
+    ports: ["8001:8000"]
+    depends_on:
+      mysql: { condition: service_healthy }
