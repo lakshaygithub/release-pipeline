@@ -5,8 +5,9 @@ metadata:
   namespace: release-pipeline
 spec:
   replicas: 3
-  # Give up on a rollout that makes no progress for 60 s; deploy.sh then rolls back.
-  progressDeadlineSeconds: 60
+  # Give up on a rollout that makes no progress for 30 s; deploy.sh then rolls back.
+  # (Was 60 s; a healthy pod is ready in a few seconds, so 30 s still leaves room.)
+  progressDeadlineSeconds: 30
   minReadySeconds: 5
   revisionHistoryLimit: 5
   strategy:

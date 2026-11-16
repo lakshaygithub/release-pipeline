@@ -20,7 +20,7 @@ if kubectl -n "$NS" rollout status deployment/api --timeout="$TIMEOUT"; then
   exit 0
 fi
 
-echo "Rollout of ${TAG} failed its health checks; rolling back to ${previous}"
+echo "Rollout of ${TAG} failed its health checks after $(( $(date +%s) - start ))s; rolling back to ${previous}"
 kubectl -n "$NS" rollout undo deployment/api
 kubectl -n "$NS" rollout status deployment/api --timeout="$TIMEOUT"
 echo "Rolled back to ${previous}; total time $(( $(date +%s) - start ))s"
