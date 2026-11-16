@@ -1,10 +1,12 @@
 import logging
+import time
 from contextlib import asynccontextmanager
 from datetime import UTC
 
 import redis
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -23,6 +25,18 @@ class ItemIn(BaseModel):
 class ItemOut(ItemIn):
     id: int
     updated_at: str
+
+
+class ItemPage(BaseModel):
+    items: list[ItemOut]
+    next_after_id: int | None
+
+
+def _set_lookup_timing(response: Response, start: float) -> None:
+    # Standard Server-Timing header: how long the cache or database lookup took
+    # inside the server, separate from network and client overhead.
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    response.headers["Server-Timing"] = f"lookup;dur={elapsed_ms:.3f}"
 
 
 def _to_out(item: Item) -> dict:
@@ -107,6 +121,22 @@ def create_app(
         session.commit()
         return _to_out(item)
 
+    @app.get("/items", response_model=ItemPage)
+    def list_items(
+        limit: int = Query(20, ge=1, le=100),
+        after_id: int = Query(0, ge=0),
+        session: Session = Depends(get_session),
+    ):
+        """Keyset pagination: pass the last id you saw as after_id. Unlike OFFSET,
+        this stays fast on deep pages and doesn't skip or repeat rows when items
+        are added or deleted between requests."""
+        rows = session.scalars(
+            select(Item).where(Item.id > after_id).order_by(Item.id).limit(limit + 1)
+        ).all()
+        page = rows[:limit]
+        next_after_id = page[-1].id if len(rows) > limit else None
+        return {"items": [_to_out(i) for i in page], "next_after_id": next_after_id}
+
     @app.get("/items/{item_id}", response_model=ItemOut)
     def read_item(
         item_id: int,
@@ -114,14 +144,17 @@ def create_app(
         session: Session = Depends(get_session),
         cache: ItemCache = Depends(get_cache),
     ):
+        start = time.perf_counter()
         cached = cache.get(item_id)
         if cached is not None:
+            _set_lookup_timing(response, start)
             response.headers["X-Cache"] = "HIT"
             return cached
         item = session.get(Item, item_id)
         if item is None:
             raise HTTPException(status_code=404, detail="item not found")
         out = _to_out(item)
+        _set_lookup_timing(response, start)
         cache.set(item_id, out)
         response.headers["X-Cache"] = "MISS" if cache.enabled else "BYPASS"
         return out

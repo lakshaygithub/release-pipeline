@@ -76,6 +76,35 @@ def test_service_keeps_working_when_redis_is_down(make_client):
         resp = client.get(f"/items/{item['id']}")
         assert resp.status_code == 200
         assert resp.json()["name"] == "Butter Chicken"
-        assert client.put(
-            f"/items/{item['id']}", json={"name": "Dal", "price_cents": 999}
-        ).status_code == 200
+        assert (
+            client.put(f"/items/{item['id']}", json={"name": "Dal", "price_cents": 999}).status_code
+            == 200
+        )
+
+
+def test_read_reports_lookup_time(client):
+    item = create(client)
+    for _ in range(2):  # MISS, then HIT
+        timing = client.get(f"/items/{item['id']}").headers["Server-Timing"]
+        assert timing.startswith("lookup;dur=")
+        assert float(timing.split("dur=")[1]) >= 0
+
+
+def test_list_items_pages_through_everything(client):
+    ids = [create(client, name=f"Item {n}")["id"] for n in range(5)]
+
+    seen, after_id = [], 0
+    while True:
+        page = client.get("/items", params={"limit": 2, "after_id": after_id}).json()
+        seen += [i["id"] for i in page["items"]]
+        if page["next_after_id"] is None:
+            break
+        after_id = page["next_after_id"]
+
+    assert seen == ids
+
+
+def test_list_items_validates_limit(client):
+    assert client.get("/items", params={"limit": 0}).status_code == 422
+    assert client.get("/items", params={"limit": 101}).status_code == 422
+    assert client.get("/items").json() == {"items": [], "next_after_id": None}
